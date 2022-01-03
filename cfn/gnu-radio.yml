@@ -1,0 +1,507 @@
+---
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates GNU Radio SDR resources for MQTT demonstration
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+
+      - Label:
+          default: "General Parameters"
+        Parameters:
+          - NotificationEmail
+          - OsPassword
+
+      - Label:
+          default: "EC2 and Network Parameters"
+        Parameters:
+          - SSHCidrBlock
+          - SSHKeyName
+          - VpcId
+          - SubnetId
+          - SdrInstanceType
+      
+      - Label: 
+          default: "VPC Peering"
+        Parameters: 
+          - CreateVPCPeeringConnection
+          - VpcPeeringConnectionID
+          - PeerVpcCidrRange
+          - PeerVpcRouteTableId
+
+      - Label:
+          default: "MQTT Parameters"
+        Parameters:
+          - MqttDownlinkTopic
+          - MqttUplinkTopic
+          - MqttQos
+          - MqttBrokerDNSName
+          - MqttBrokerCredentialsName
+          - MqttBrokerCredentialsRegion
+          - MqttBrokerCredentialsARN
+    
+
+Parameters:
+
+  SSHCidrBlock:
+    Description: The CIDR Block that the security group will allow ssh access to an instance. The CIDR Block has the form x.x.x.x/x.
+    Type: String
+    Default: "100.100.100.100/32"
+    AllowedPattern : '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    ConstraintDescription : must be a valid CIDR range of the form x.x.x.x/x, for example "10.0.0.0/16".
+
+  SSHKeyName:
+    Description: Name of the ssh key used to access ec2 hosts. Set this up ahead of time.
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+    Default: ""
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch instances in.
+    Default: "vpc-nnnnnnnn"
+  
+  CreateVPCPeeringConnection:
+    Type: String
+    Description: Create a VPC peering connection? 
+    Default: 'true'
+    AllowedValues:
+      - 'false'
+      - 'true'
+
+  VpcPeeringConnectionID: 
+    Type: String 
+    Description: The ID of the VPC peering connection between the MQTT broker and SDR VPCs
+
+  PeerVpcCidrRange:
+    Description: The CIDR range of the peering MQTT broker VPC
+    Type: String
+    Default: '10.1.0.0/16'
+    AllowedPattern : '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    ConstraintDescription : must be a valid CIDR range of the form x.x.x.x/x, for example "10.0.0.0/16".
+
+  PeerVpcRouteTableId:
+    Type: String 
+    Description: The ID of the route table associated with the SDR subnet
+
+  SubnetId:
+    Description: Subnet to launch instances in
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-nnnnnnnn"
+
+  SdrInstanceType:
+    Description: GNU Radio EC2 Instance Type
+    Type: String
+    Default: "c5.4xlarge"
+    AllowedValues:
+      - c5.large
+      - c5.xlarge
+      - c5.2xlarge
+      - c5.4xlarge
+      - c5.9xlarge
+      - c5.12xlarge
+      - c5.18xlarge
+      - c5.24xlarge
+
+  NotificationEmail:
+    Default: 'someone@somewhere.com'
+    Description: "Email address to receive contact updates"
+    Type: String
+    AllowedPattern: "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$"
+    ConstraintDescription: "Must be a valid email adress"
+
+  OsPassword:
+    Type: String
+    Description: Password for the GNU Radio instance ubuntu user - no CLI un-friendly chars please
+    Default: ''
+    NoEcho: true
+
+  MqttDownlinkTopic:
+    Type: String
+    Description: GNU Radio will publish downlinked data to this topic
+    Default: 'downlink'
+  
+  MqttUplinkTopic:
+    Type: String
+    Description: GNU Radio will subscribe to this topic for data to uplink
+    Default: 'uplink'
+
+  MqttQos:
+    Type: Number
+    Description: Desired MQTT Quality of Service (QoS)
+    Default: 1
+    AllowedValues:
+      - 0
+      - 1
+      - 2
+
+  MqttBrokerDNSName:
+    Type: String
+    Description: The DNS name of the mqtt broker private load balancer
+
+  MqttBrokerCredentialsName:
+    Type: String
+    Description: The name of the MQTT broker credentials stored in AWS Secrets Manager
+
+  MqttBrokerCredentialsRegion:
+    Type: String
+    Description: The AWS region where the MQTT broker credentials are stored in AWS Secrets Manager
+
+  MqttBrokerCredentialsARN:
+    Type: String
+    Description: The ARN of the MQTT broker credentials
+
+
+
+
+
+# ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-202*
+Mappings:
+  AmiMap:
+    eu-north-1:
+      ami: ami-0b10b3680c5d18124
+    eu-west-1:
+      ami: ami-0e5657f6d3c3ea350
+    me-south-1:
+      ami: ami-0c288c79750011574
+    us-east-1:
+      ami: ami-02fe94dee086c0c37
+    us-east-2:
+      ami: ami-02aa7f3de34db391a
+    us-west-2:
+      ami: ami-025102f49d03bec05
+
+Conditions:
+ 
+  ConditionCreateVPCPeeringConnection:
+      'Fn::Equals':
+      - Ref: CreateVPCPeeringConnection
+      - 'true'
+
+
+ 
+Resources:
+
+# ============================================
+# VPC Peering Resources
+# ============================================
+
+  VpcPeeringRoute:
+    Condition: ConditionCreateVPCPeeringConnection
+    Type: 'AWS::EC2::Route'
+    Properties:
+        DestinationCidrBlock: !Ref PeerVpcCidrRange
+        RouteTableId: !Ref PeerVpcRouteTableId
+        VpcPeeringConnectionId: !Ref VpcPeeringConnectionID
+
+# ============================================
+# SNS Resources
+# ============================================
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName:
+        Fn::Join:
+          - "-"
+          - - "GNU-Radio"
+            - "notfications"
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: "email"
+
+# ============================================
+# IAM Resources
+# ============================================
+
+
+  # --------------------------
+  # SDR Instance Role
+  # --------------------------
+
+  SdrInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SdrInstanceRoleSNSPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - "sns:Publish"
+          Effect: Allow
+          Resource: !Ref SNSTopic
+      Roles:
+      - Ref: SdrInstanceRole
+
+  SdrInstanceRoleSecretsManagerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - "secretsmanager:GetResourcePolicy"
+          - "secretsmanager:GetSecretValue"
+          - "secretsmanager:DescribeSecret"
+          - "secretsmanager:ListSecretVersionIds"
+          Effect: Allow
+          Resource: !Ref MqttBrokerCredentialsARN
+      Roles:
+      - Ref: SdrInstanceRole
+
+# ============================================
+# Security Groups
+# ============================================
+
+  # --------------------------
+  # SDR Instance SG
+  # --------------------------
+
+  SdrInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SDR instance security group.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Allow SSH access from the CIDR block specified in the parameters.
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHCidrBlock
+          Description: SSH management traffic
+
+# ============================================
+# Network Resources
+# ============================================
+
+  # ---------------------------------
+  # SDR Instance network resources
+  # ---------------------------------
+
+  SdrInstanceEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: 'vpc'
+
+  SdrInstanceEIPAsscociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt SdrInstanceEIP.AllocationId
+      NetworkInterfaceId: !Ref SdrInstanceNetworkInterfacePublic
+
+  SdrInstanceNetworkInterfacePublic:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: Public network interface for troubleshooting
+      GroupSet:
+        - !Ref SdrInstanceSecurityGroup
+      SubnetId: !Ref SubnetId
+
+# ============================================
+# EC2 Instance Resources
+# ============================================
+
+  # --------------------------
+  # GNU Radio Instance
+  # --------------------------
+
+  SdrGeneralInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: SdrInstanceRole
+    Properties:
+      Roles:
+        - !Ref SdrInstanceRole
+
+  SdrInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - SdrInstanceSecurityGroup
+      - SdrGeneralInstanceProfile
+    Properties:
+      DisableApiTermination: false
+      IamInstanceProfile: !Ref SdrGeneralInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+          [AmiMap, Ref: "AWS::Region", ami]
+      InstanceType: !Ref SdrInstanceType
+      KeyName: !Ref SSHKeyName
+
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref SdrInstanceNetworkInterfacePublic
+          DeviceIndex: 0
+
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 150
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - "-"
+              - - GNU-Radio
+                - !Ref AWS::StackName
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+              echo `date +'%F %R:%S'` "INFO: Logging Setup" >&2
+
+              echo '========================================='
+              echo "Set Paths"
+              echo '========================================='
+              export WORKING_DIR="/opt/aws/groundstation"
+              export WORKING_BIN_DIR="$WORKING_DIR/bin"
+              export SPACE_SOLUTIONS_BUCKET="space-solutions-${AWS::Region}"
+              export PREFIX='/home/ubuntu/sdr'
+              export GNU_RADIO_RECIPE_DIR="$PREFIX/recipes"
+
+              echo "WORKING_DIR         : $WORKING_DIR"
+              echo "WORKING_BIN_DIR     : $WORKING_BIN_DIR"
+              echo "SPACE_SOLUTIONS_BUCKET     : $SPACE_SOLUTIONS_BUCKET"
+              echo "GNU Radio installation dir : $PREFIX"
+              echo "GNU Radio recipe dir       : $GNU_RADIO_RECIPE_DIR"
+
+              echo '========================================='
+              echo "Create dirs"
+              echo '========================================='
+              mkdir -p "$PREFIX"
+              mkdir -p "$WORKING_BIN_DIR"
+
+              echo '========================================='
+              echo "Install OS Packages"
+              echo '========================================='
+              # Fix Error: dpkg-reconfigure: unable to re-open stdin: No file or directory
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -y && apt-get upgrade -y
+              apt-get install -y jq
+
+              echo '========================================='
+              echo "Install AWS CLI and SDK..."
+              echo '========================================='
+              apt-get install -y python
+              apt-get install -y python3
+              apt-get install -y python-pip
+              apt-get install -y python3-pip
+              python -m pip install --upgrade pip --user
+              python3 -m pip install --upgrade pip --user
+              python -m pip install awscli --user
+              python3 -m pip install awscli --user
+              python -m pip install boto3
+              python3 -m pip install boto3
+              echo "export PATH=~/.local/bin:$PATH" >> ~/.bash_profile
+              source ~/.bash_profile
+
+              echo '========================================='
+              echo "Configure OS"
+              echo '========================================='
+              sysctl -w net.core.rmem_default=26214400
+              sysctl -w net.core.rmem_max=104857600
+              sysctl -w net.core.wmem_default=65536
+              sysctl -w net.core.wmem_max=104857600
+              sysctl -p
+              echo "net.core.rmem_default=26214400" >> /etc/sysctl.conf
+              echo "net.core.rmem_max=104857600" >> /etc/sysctl.conf
+              echo "net.core.wmem_default=65536" >> /etc/sysctl.conf
+              echo "net.core.wmem_max=104857600" >> /etc/sysctl.conf
+
+              echo '========================================='
+              echo "Get GNU Radio install script"
+              echo '========================================='
+              aws s3 cp s3://$SPACE_SOLUTIONS_BUCKET/software/gnu-radio/install-vanilla-gnu-radio.sh $WORKING_BIN_DIR/install-gnu-radio.sh --region ${AWS::Region}
+              chmod +x $WORKING_BIN_DIR/*.sh
+
+              echo '========================================='
+              echo "Configure SNS"
+              echo '========================================='
+              echo "Creating $WORKING_BIN_DIR/getSNSTopic.sh"
+              echo "export SNS_TOPIC=${SNSTopicArn}" > $WORKING_BIN_DIR/getSNSTopic.sh
+              chmod +x $WORKING_BIN_DIR/getSNSTopic.sh
+
+              echo '========================================='
+              echo "Start GNU Radio install"
+              echo '========================================='
+              $WORKING_BIN_DIR/install-gnu-radio.sh "$PREFIX" ${OsPassword} $SPACE_SOLUTIONS_BUCKET
+
+              echo '========================================='
+              echo "Get GNU Radio Recipes from S3"
+              echo '========================================='
+              mkdir -p $GNU_RADIO_RECIPE_DIR
+
+              # Custom Python MQTT pub/sub source
+              aws s3 cp s3://$SPACE_SOLUTIONS_BUCKET/software/gnu-radio/recipes/satlab/mqtt_pub_0.py $GNU_RADIO_RECIPE_DIR/ --region ${AWS::Region}
+              aws s3 cp s3://$SPACE_SOLUTIONS_BUCKET/software/gnu-radio/recipes/satlab/mqtt_sub_0.py $GNU_RADIO_RECIPE_DIR/ --region ${AWS::Region}
+              
+              # MQTT tester GRC Recipe
+              aws s3 cp s3://$SPACE_SOLUTIONS_BUCKET/software/gnu-radio/recipes/satlab/mqtt_tester.grc $GNU_RADIO_RECIPE_DIR/ --region ${AWS::Region}
+
+
+              # Create the mqtt-parameters config json
+              echo "Creating $PREFIX/mqtt-parameters.json"
+              cat << MQTT_PARAMETERS > $PREFIX/mqtt-parameters.json
+              {
+                  "MqqtBrokerCredentialsName": "${MqttBrokerCredentialsName}",
+                  "MqqtBrokerCredentialsRegion": "${MqttBrokerCredentialsRegion}",
+                  "MqttBrokerIp": "${MqttBrokerDNSName}",
+                  "MqttDownlinkTopic": "${MqttDownlinkTopic}",
+                  "MqttQos": "${MqttQos}",
+                  "MqttUplinkTopic": "${MqttUplinkTopic}"
+              }
+              MQTT_PARAMETERS
+
+              echo '========================================='
+              echo "Update folder permissions"
+              echo '========================================='
+              echo "Updating permissions on $WORKING_BIN_DIR"
+              chown -R ubuntu:ubuntu $WORKING_BIN_DIR
+
+              echo "Updating permissions on $PREFIX"
+              chown -R ubuntu:ubuntu $PREFIX
+
+              echo '========================================='
+              echo "Sending completion SNS notification"
+              echo '========================================='
+              export MESSAGE="GNU Radio was successfully installed to $PREFIX and configured for MQTT testing."
+              aws sns publish --topic-arn ${SNSTopicArn} --message "$MESSAGE" --region ${AWS::Region}
+
+              echo "Shutting down the EC2 instance"
+              shutdown -h now
+
+            - OsPassword: !Ref OsPassword
+              SNSTopicArn: !Ref SNSTopic
+              
+
+ 
+# ============================================
+# Outputs
+# ============================================
+
+Outputs:
+  SnsTopicArn:
+    Value:
+      Ref: SNSTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-SnsTopicArn"

@@ -1,0 +1,590 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Creates VPC, subnets, routes, VPC peering connection, Network load balancer, autoscalling group, MQTT broker, Secrets Manager credentials"
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+
+      - Label:
+          default: "Network Parameters"
+        Parameters:
+          - VpcCidr
+          - PeerVpcId
+          - PeerVpcRegion
+          - PeerVpcCIDRRange
+
+      - Label:
+          default: "EC2 MQTT Broker Parameters"
+        Parameters:
+          - InstanceType
+          - MQTTCidrBlock
+          - MQTTUsername
+          - MQTTPassword
+          - CaCertificateValue
+          - ServerCertificateValue
+          - ServerKeyValue
+          - DomainName
+          
+
+Parameters:
+  VpcCidr:
+    Default: '10.1.0.0/16'
+    Type: String
+    Description: The CIDR range of the broker VPC. Must not overlap with the SDR VPC CIDR range.
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+  InstanceType:
+    Default: 't3.medium'
+    Type: String
+  MQTTUsername:
+    Type: String
+    Description: Username for the MQTT broker
+    Default: ''
+  MQTTPassword:
+    Type: String
+    Description: Password for the MQTT broker
+    Default: ''
+    NoEcho: false
+  CaCertificateValue:
+    Type: String
+    Description: The CA certificate of the CA. Only the value between the -----BEGIN CERTIFICATE----- and -----END CERTIFICATE----- tags. 
+    Default: ""
+    NoEcho: false
+  ServerCertificateValue:
+    Type: String
+    Description: The server certificate of the MQTT server. Only the value between the -----BEGIN CERTIFICATE----- and -----END CERTIFICATE----- tags. 
+    Default: ""
+    NoEcho: false
+  ServerKeyValue:
+    Type: String
+    Description: The server key of the MQTT server. Only the value between the -----BEGIN RSA PRIVATE KEY----- and -----END RSA PRIVATE KEY----- tags. 
+    Default: ""
+    NoEcho: false
+  PeerVpcId: 
+    Type: String 
+    Description: The ID of the SDR VPC
+    Default: ''
+  PeerVpcRegion:
+    Type: String
+    Description: The AWS region of SDR VPC
+    Default: ''
+  PeerVpcCIDRRange:
+    Description: The CIDR range of the peering SDR VPC
+    Type: String
+    Default: '172.31.0.0/16'
+    AllowedPattern : '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    ConstraintDescription : must be a valid CIDR range of the form x.x.x.x/x, for example "10.0.0.0/16".
+  DomainName:
+    Description: Must match the common name of the broker TLS certificate. Domain name record associated with the TLS certifcate to be assigned to the public Network Load Balancer.
+    Type: String
+    Default: ''
+  DomainHostedZoneId:
+    Description: Hosted zone id for the domain that the NLB will be a part of
+    Type: AWS::Route53::HostedZone::Id
+  MQTTCidrBlock:
+    Description: The CIDR Block that the security group will allow MQTT over TLS access to teh broker. The CIDR Block has the form x.x.x.x/x.
+    Type: String
+    Default: "100.100.100.100/32"
+    AllowedPattern : '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    ConstraintDescription : must be a valid CIDR range of the form x.x.x.x/x, for example "10.0.0.0/16".
+
+Mappings:
+  AmiMap:
+    eu-west-1:
+      ami: ami-0943382e114f188e8
+    eu-north-1:
+      ami: ami-0afad43e7d620260c
+    me-south-1:
+      ami: ami-0c288c79750011574
+    us-east-1:
+      ami: ami-0747bdcabd34c712a
+    us-east-2:
+      ami: ami-0b9064170e32bde34
+    us-west-2:
+      ami: ami-090717c950a5c34d3
+
+Resources:
+# ============================================
+# VPC Resources
+# ============================================
+
+  # --------------------------
+  # VPC 
+  # --------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+  
+  # --------------------------
+  # VPC peering
+  # --------------------------
+  VpcPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties: 
+      PeerRegion: !Ref PeerVpcRegion
+      PeerVpcId: !Ref PeerVpcId 
+      VpcId: !Ref Vpc
+
+  VpcRoutePeeringPublic:
+    Type: 'AWS::EC2::Route'
+    Properties:
+        DestinationCidrBlock: !Ref PeerVpcCIDRRange
+        RouteTableId: !Ref VpcRouteTablePublic
+        VpcPeeringConnectionId: !Ref VpcPeering
+
+  # --------------------------
+  # Public Subnet
+  # --------------------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 2, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 3, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref AWS::Region
+
+  # --------------------------
+  # VPC Igw
+  # --------------------------
+  VpcIgw:
+    Type: 'AWS::EC2::InternetGateway'
+
+  VpcAttachGateway:
+      Type: 'AWS::EC2::VPCGatewayAttachment'
+      Properties:
+          InternetGatewayId: !Ref VpcIgw
+          VpcId: !Ref Vpc
+
+  # --------------------------
+  # Public route table 
+  # --------------------------
+  VpcRouteTablePublic:
+      Type: 'AWS::EC2::RouteTable'
+      Properties:
+        VpcId: !Ref Vpc
+
+  VpcRouteIgw:
+      Type: 'AWS::EC2::Route'
+      Properties:
+          DestinationCidrBlock: 0.0.0.0/0
+          RouteTableId: !Ref VpcRouteTablePublic
+          GatewayId: !Ref VpcIgw
+
+  # --------------------------
+  # VPC Route Table Associations
+  # --------------------------
+
+  PublicSubnet1RouteTableAssociation:
+      Type: 'AWS::EC2::SubnetRouteTableAssociation'
+      Properties:
+          RouteTableId: !Ref VpcRouteTablePublic
+          SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+      Type: 'AWS::EC2::SubnetRouteTableAssociation'
+      Properties:
+          RouteTableId: !Ref VpcRouteTablePublic
+          SubnetId: !Ref PublicSubnet2
+
+
+# ============================================
+# Secret Resources
+# ============================================
+
+  MqttSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: MqttCredentials
+      SecretString: !Sub '{"username":${MQTTUsername},"password":${MQTTPassword}}'
+
+  CaCertificateSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: CaCertificateSecret
+      SecretString: !Sub '{"ca.crt":${CaCertificateValue}}'
+  
+  ServerCertificateSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: ServerCertificateSecret
+      SecretString: !Sub '{"ca.crt":${ServerCertificateValue}}'
+
+  ServerKeySecret: 
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: ServerKeySecret
+      SecretString: !Sub '{"ca.crt":${ServerKeyValue}}'
+
+# ============================================
+# IAM Resources
+# ============================================
+  
+  MqttInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  MqttInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref MqttInstanceRole
+  
+  MqttInstanceRoleSecretsManagerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - "secretsmanager:GetResourcePolicy"
+          - "secretsmanager:GetSecretValue"
+          - "secretsmanager:DescribeSecret"
+          - "secretsmanager:ListSecretVersionIds"
+          Effect: Allow
+          Resource: 
+            - !Ref MqttSecret
+            - !Ref CaCertificateSecret
+            - !Ref ServerCertificateSecret
+            - !Ref ServerKeySecret
+      Roles:
+      - Ref: MqttInstanceRole
+
+# ============================================
+# Auto Scaling Group Resources
+# ============================================
+  AsgLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-launch-template
+      LaunchTemplateData:
+        CreditSpecification:
+          CpuCredits: unlimited
+        MetadataOptions:
+          HttpEndpoint: disabled
+        ImageId:
+          Fn::FindInMap:
+            - AmiMap
+            - Ref: AWS::Region
+            - ami
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: 
+          Name: !Ref MqttInstanceProfile
+        #KeyName: !Ref SSHKeyName
+        Monitoring:
+          Enabled: True
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: True
+            DeviceIndex: 0
+            Groups: 
+            - !Ref MqttBrokerSecurityGroup
+        BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 20
+        UserData:
+          Fn::Base64: 
+            Fn::Sub:
+              - |
+                #!/bin/bash
+              
+                exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+                echo `date +'%F %R:%S'` "INFO: Logging Setup" >&2
+
+                echo '========================================='
+                echo "Install OS Packages"
+                echo '========================================='
+                # Fix Error: dpkg-reconfigure: unable to re-open stdin: No file or directory
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -y && apt-get upgrade -y
+                apt-get install -y jq
+
+                echo '========================================='
+                echo "Install AWS CLI"
+                echo '========================================='
+                apt-get install -y python3
+                apt-get install -y python3-pip
+                python3 -m pip install --upgrade pip --user
+                python3 -m pip install awscli --user
+                apt-get install awscli -y
+
+                echo '========================================='
+                echo "Install Mosquitto"
+                echo '========================================='
+                apt-add-repository ppa:mosquitto-dev/mosquitto-ppa -y
+                apt-get update -y
+                apt-get install mosquitto mosquitto-clients -y 
+
+                echo '========================================='
+                echo "Creating /etc/mosquitto/conf.d/default.conf"
+                echo '========================================='
+                cat << DEFAULT_CONFIG > /etc/mosquitto/conf.d/default.conf
+                allow_anonymous false
+                password_file /etc/mosquitto/passwd
+                listener 1883
+                listener 8883
+                certfile /etc/mosquitto/certs/server.crt
+                cafile /etc/mosquitto/ca_certificates/ca.crt
+                keyfile /etc/mosquitto/certs/server.key 
+                tls_version tlsv1.2
+                DEFAULT_CONFIG
+
+                # script to check if Mosquitto is running and restart it if it has stoped
+                echo '========================================='
+                echo "Creating /home/ubuntu/mosquitto_restart.sh"
+                echo '========================================='
+                echo 'if [ "$(ps -aux | grep /usr/sbin/mosquitto | wc -l)" = "1" ]' >> /home/ubuntu/mosquitto_restart.sh
+                cat << RESTART_SCRIPT >> /home/ubuntu/mosquitto_restart.sh
+                then
+                      echo "Mosquitto is not  running. Attempting restart." >> /home/ubuntu/cron.log
+                      systemctl restart mosquitto
+                      exit 0
+                fi
+                echo "Mosquitoo  is currently running" >> /home/ubuntu/cron.log
+                exit 0
+                RESTART_SCRIPT
+
+                # make script executable
+                chmod +x /home/ubuntu/mosquitto_restart.sh
+
+                # put script into crontab
+                crontab -l > currentcron
+                echo "*/5 * * * * /home/ubuntu/mosquitto_restart.sh" >> currentcron
+                crontab currentcron
+                rm currentcron
+
+
+                echo '========================================='
+                echo "Adding username/password to /etc/mosquitto/passwd"
+                echo '========================================='
+                SecretString=`aws secretsmanager get-secret-value --secret-id ${MqttCredentialsARN} --region ${Region} | jq -r '.SecretString'`
+                username="$(echo $SecretString | cut -d',' -f1 | cut -d':' -f2)"
+                password="$(echo $SecretString | cut -d',' -f2 | cut -d':' -f2 | rev | cut -c2- | rev)"
+                
+                touch /etc/mosquitto/passwd
+                mosquitto_passwd -b /etc/mosquitto/passwd $username $password
+
+                echo '========================================='
+                echo "Copying TLS certs and keys from AWS Secrets Manager"
+                echo '========================================='
+          
+                CaSecretString=`aws secretsmanager get-secret-value --secret-id ${CaCertificateARN} --region ${Region} | jq -r '.SecretString'`
+                CaCertificate="$(echo $CaSecretString | cut -d':' -f2 | rev | cut -c2- | rev | cut -d '"' -f 2)"
+                echo "-----BEGIN CERTIFICATE-----" >> /etc/mosquitto/ca_certificates/ca.crt
+                echo $CaCertificate | tr " " "\n" >> /etc/mosquitto/ca_certificates/ca.crt
+                echo "-----END CERTIFICATE-----" >> /etc/mosquitto/ca_certificates/ca.crt
+                echo "Placed CA certificate in /etc/mosquitto/ca_certificates/ca.crt"
+
+
+
+                ServerSecretString=`aws secretsmanager get-secret-value --secret-id ${ServerCertificateARN} --region ${Region} | jq -r '.SecretString'`
+                ServerCertificate="$(echo $ServerSecretString | cut -d':' -f2 | rev | cut -c2- | rev | cut -d '"' -f 2)"
+                echo "-----BEGIN CERTIFICATE-----" >> /etc/mosquitto/certs/server.crt
+                echo $ServerCertificate | tr " " "\n" >> /etc/mosquitto/certs/server.crt
+                echo "-----END CERTIFICATE-----" >> /etc/mosquitto/certs/server.crt
+                echo "Placed server certificate in /etc/mosquitto/certs/server.crt"
+
+
+                ServerKeySecretString=`aws secretsmanager get-secret-value --secret-id ${ServerKeyARN} --region ${Region} | jq -r '.SecretString'`
+                ServerKey="$(echo $ServerKeySecretString | cut -d':' -f2 | rev | cut -c2- | rev | cut -d '"' -f 2)"
+                echo "-----BEGIN RSA PRIVATE KEY-----" >> /etc/mosquitto/certs/server.key
+                echo $ServerKey | tr " " "\n" >> /etc/mosquitto/certs/server.key
+                echo "-----END RSA PRIVATE KEY-----" >> /etc/mosquitto/certs/server.key
+                echo "Placed server key in /etc/mosquitto/certs/server.key"
+                
+
+                echo '========================================='
+                echo "Configuration complete. Restarting instance for configurations to take effect."
+                echo '========================================='
+                reboot 
+ 
+              - MqttCredentialsARN: !Ref MqttSecret
+                CaCertificateARN: !Ref CaCertificateSecret
+                ServerCertificateARN: !Ref ServerCertificateSecret
+                ServerKeyARN: !Ref ServerKeySecret
+                Region: !Ref AWS::Region
+
+  MqttBrokerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable TCP access via port 1883 from local and peered VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 1883
+          ToPort: 1883
+          CidrIp: !Ref PeerVpcCIDRRange
+          Description: MQTT from perring VPCs
+        - IpProtocol: tcp
+          FromPort: 8883
+          ToPort: 8883
+          CidrIp: !Ref MQTTCidrBlock
+          Description: MQTT from on-prem
+        - IpProtocol: tcp
+          FromPort: 8883
+          ToPort: 8883
+          CidrIp: !Ref VpcCidr
+          Description: NLBs health check connections
+      VpcId: !Ref Vpc 
+
+  MqttAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: 
+        - PublicSubnet1RouteTableAssociation
+        - PublicSubnet2RouteTableAssociation
+    Properties:
+      AutoScalingGroupName: MqttAsg
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AsgLaunchTemplate
+        Version: !GetAtt AsgLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      TargetGroupARNs:
+        - !Ref TargetGroupPrivate
+        - !Ref TargetGroupPublic
+
+# ============================================
+# Network Load Balancer Resources
+# ============================================
+ 
+  # --------------------------
+  # Private Load Balancer
+  # --------------------------
+
+  NetworkLoadBalancerPrivate:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-nlb-private"
+      Scheme: internal
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2 
+      Type: network
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        # Add logging attributes 
+      
+  TargetGroupPrivate:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Port: 1883
+      Protocol: TCP
+      HealthCheckPort: "8883"
+      HealthCheckProtocol: TCP
+      TargetType: instance
+      VpcId: !Ref Vpc
+      
+  ListenerPrivate:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancerPrivate
+      Port: 1883
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupPrivate
+
+
+  # --------------------------
+  # Public Load Balancer
+  # --------------------------
+
+  NetworkLoadBalancerPublic:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-nlb-public"
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Type: network
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true" 
+        - Key: access_logs.s3.enabled
+          Value: "true"
+      
+  TargetGroupPublic:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Port: 8883
+      Protocol: TCP
+      HealthCheckPort: "8883"
+      HealthCheckProtocol: TCP
+      TargetType: instance
+      VpcId: !Ref Vpc
+      
+  ListenerPublic:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancerPublic
+      Port: 8883
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupPublic
+
+# ============================================
+# DNS Resources
+# ============================================
+
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt NetworkLoadBalancerPublic.DNSName
+        HostedZoneId: !GetAtt NetworkLoadBalancerPublic.CanonicalHostedZoneID
+        EvaluateTargetHealth: False
+      HostedZoneId: !Ref DomainHostedZoneId
+      Name: !Ref DomainName
+      Type: "A"
+
+Outputs:
+  MqttCredentials:
+    Value:
+      Ref: MqttSecret
+
+  PublicNetworkLoadBalancerDNS:
+    Value: !GetAtt NetworkLoadBalancerPublic.DNSName 
+
+  PrivateNetworkLoadBalancerDNS:
+    Value: !GetAtt NetworkLoadBalancerPrivate.DNSName 
+
+  VPCPeeringConnectionID:
+    Value: !Ref VpcPeering
+  
+  MqttVpcCidrBlock:
+    Value: !GetAtt Vpc.CidrBlock
